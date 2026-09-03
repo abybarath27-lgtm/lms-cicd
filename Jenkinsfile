@@ -18,7 +18,7 @@ pipeline {
         LMS_USER = 'ubuntu'
 
         // Change this to your actual LMS URL
-        LMS_URL = 'https://local.openedx.io'
+        LMS_URL = 'http://local.openedx.io'
 
         // Jenkins credential ID
         SSH_CREDENTIALS = 'lms-ssh-key'
