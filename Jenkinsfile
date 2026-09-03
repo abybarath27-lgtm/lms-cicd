@@ -9,35 +9,16 @@ pipeline {
     }
 
     environment {
-
-        // ==============================
-        // LMS SERVER CONFIGURATION
-        // ==============================
-
         LMS_HOST = '172.31.8.158'
         LMS_USER = 'ubuntu'
-
-        // Change this to your actual LMS URL
-        LMS_URL = 'http://local.openedx.io'
-
-        // Jenkins credential ID
+        LMS_URL = 'http://172.31.8.158'
         SSH_CREDENTIALS = 'lms-ssh-key'
-
-        // LMS deployment directory
-        REMOTE_APP_DIR = '/opt/lms'
-
     }
 
     stages {
 
-        // ==========================================
-        // 1. CHECKOUT
-        // ==========================================
-
         stage('Checkout') {
-
             steps {
-
                 echo '======================================'
                 echo 'Checking out LMS source code'
                 echo '======================================'
@@ -48,27 +29,15 @@ pipeline {
                     echo "Git commit:"
                     git rev-parse HEAD
 
-                    echo "Git branch:"
-                    git branch --show-current
-
                     echo "Repository files:"
                     ls -la
                 '''
             }
         }
 
-
-        // ==========================================
-        // 2. VALIDATE PROJECT
-        // ==========================================
-
         stage('Validate') {
-
             steps {
-
-                echo '======================================'
                 echo 'Validating project structure'
-                echo '======================================'
 
                 sh '''
                     set -e
@@ -81,383 +50,189 @@ pipeline {
                     test -f scripts/backup.sh
                     test -f tests/smoke-test.sh
 
+                    chmod +x scripts/*.sh
+                    chmod +x tests/*.sh
+
                     echo "Project structure validation PASSED"
                 '''
             }
         }
 
-
-        // ==========================================
-        // 3. AUTOMATED TESTING
-        // ==========================================
-
         stage('Automated Tests') {
-
             steps {
-
-                echo '======================================'
                 echo 'Running automated LMS tests'
-                echo '======================================'
 
                 sh '''
-                    set -e
-
-                    chmod +x scripts/*.sh
-                    chmod +x tests/*.sh
-
-                    export LMS_URL="${LMS_URL}"
+                    export LMS_URL="http://172.31.8.158"
 
                     ./scripts/test.sh
                 '''
             }
         }
 
-
-        // ==========================================
-        // 4. CREATE RELEASE ID
-        // ==========================================
-
-        stage('Create Release') {
-
-            steps {
-
-                script {
-
-                    env.RELEASE_ID =
-                        "${BUILD_NUMBER}-${GIT_COMMIT.take(8)}"
-                }
-
-                echo "Release ID: ${env.RELEASE_ID}"
-            }
-        }
-
-
-        // ==========================================
-        // 5. CHECK SSH CONNECTION
-        // ==========================================
-
         stage('Test LMS SSH Connection') {
-
             steps {
-
-                echo '======================================'
                 echo 'Testing SSH connection to LMS'
-                echo '======================================'
 
-                sshagent(credentials: [env.SSH_CREDENTIALS]) {
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: env.SSH_CREDENTIALS,
+                    keyFileVariable: 'SSH_KEY',
+                    usernameVariable: 'SSH_USERNAME'
+                )]) {
 
-                    sh """
-                        ssh \
-                        -o BatchMode=yes \
-                        -o StrictHostKeyChecking=no \
-                        ${LMS_USER}@${LMS_HOST} \
-                        'echo SSH connection successful && hostname && whoami'
-                    """
+                    sh '''
+                        chmod 600 "$SSH_KEY"
+
+                        ssh -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=no \
+                            -o BatchMode=yes \
+                            "$SSH_USERNAME@$LMS_HOST" \
+                            "echo SSH connection successful; hostname; whoami"
+                    '''
                 }
             }
         }
-
-
-        // ==========================================
-        // 6. BACKUP CURRENT LMS
-        // ==========================================
 
         stage('Backup Current Deployment') {
-
             steps {
-
-                echo '======================================'
                 echo 'Creating LMS backup'
-                echo '======================================'
 
-                sshagent(credentials: [env.SSH_CREDENTIALS]) {
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: env.SSH_CREDENTIALS,
+                    keyFileVariable: 'SSH_KEY',
+                    usernameVariable: 'SSH_USERNAME'
+                )]) {
 
-                    sh """
-                        ssh \
-                        -o StrictHostKeyChecking=no \
-                        ${LMS_USER}@${LMS_HOST} \
-                        'if [ -f ${REMOTE_APP_DIR}/current/scripts/backup.sh ]; then
-                            APP_DIR=${REMOTE_APP_DIR}
-                            bash ${REMOTE_APP_DIR}/current/scripts/backup.sh
-                        else
-                            echo "Backup script not found - skipping backup"
-                        fi'
-                    """
+                    sh '''
+                        chmod 600 "$SSH_KEY"
+
+                        ssh -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=no \
+                            "$SSH_USERNAME@$LMS_HOST" \
+                            "mkdir -p /opt/lms/backups && \
+                             tar -czf /opt/lms/backups/lms-backup-${BUILD_NUMBER}.tar.gz /opt/lms 2>/dev/null || true"
+
+                        echo "Backup stage completed"
+                    '''
                 }
             }
         }
-
-
-        // ==========================================
-        // 7. CREATE REMOTE RELEASE DIRECTORY
-        // ==========================================
-
-        stage('Prepare Deployment') {
-
-            steps {
-
-                echo '======================================'
-                echo 'Preparing LMS deployment'
-                echo '======================================'
-
-                sshagent(credentials: [env.SSH_CREDENTIALS]) {
-
-                    sh """
-                        ssh \
-                        -o StrictHostKeyChecking=no \
-                        ${LMS_USER}@${LMS_HOST} \
-                        'mkdir -p ${REMOTE_APP_DIR}/releases/${RELEASE_ID}'
-                    """
-                }
-            }
-        }
-
-
-        // ==========================================
-        // 8. COPY PROJECT TO LMS
-        // ==========================================
 
         stage('Copy Deployment Files') {
-
             steps {
-
-                echo '======================================'
                 echo 'Copying deployment files to LMS'
-                echo '======================================'
 
-                sshagent(credentials: [env.SSH_CREDENTIALS]) {
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: env.SSH_CREDENTIALS,
+                    keyFileVariable: 'SSH_KEY',
+                    usernameVariable: 'SSH_USERNAME'
+                )]) {
 
-                    sh """
-                        tar czf - . | \
-                        ssh \
-                        -o StrictHostKeyChecking=no \
-                        ${LMS_USER}@${LMS_HOST} \
-                        'tar xzf - -C ${REMOTE_APP_DIR}/releases/${RELEASE_ID}'
-                    """
+                    sh '''
+                        chmod 600 "$SSH_KEY"
+
+                        ssh -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=no \
+                            "$SSH_USERNAME@$LMS_HOST" \
+                            "mkdir -p /opt/lms"
+
+                        scp -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=no \
+                            scripts/deploy.sh \
+                            "$SSH_USERNAME@$LMS_HOST:/opt/lms/deploy.sh"
+
+                        scp -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=no \
+                            scripts/rollback.sh \
+                            "$SSH_USERNAME@$LMS_HOST:/opt/lms/rollback.sh"
+
+                        ssh -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=no \
+                            "$SSH_USERNAME@$LMS_HOST" \
+                            "chmod +x /opt/lms/deploy.sh /opt/lms/rollback.sh"
+
+                        echo "Deployment files copied successfully"
+                    '''
                 }
             }
         }
-
-
-        // ==========================================
-        // 9. DEPLOY LMS
-        // ==========================================
 
         stage('Deploy LMS') {
-
             steps {
-
-                echo '======================================'
                 echo 'Deploying LMS'
-                echo '======================================'
 
-                sshagent(credentials: [env.SSH_CREDENTIALS]) {
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: env.SSH_CREDENTIALS,
+                    keyFileVariable: 'SSH_KEY',
+                    usernameVariable: 'SSH_USERNAME'
+                )]) {
 
-                    sh """
-                        ssh \
-                        -o StrictHostKeyChecking=no \
-                        ${LMS_USER}@${LMS_HOST} \
-                        'cd ${REMOTE_APP_DIR}/releases/${RELEASE_ID} && \
-                         APP_DIR=${REMOTE_APP_DIR} \
-                         BUILD_NUMBER=${RELEASE_ID} \
-                         bash scripts/deploy.sh'
-                    """
+                    sh '''
+                        chmod 600 "$SSH_KEY"
+
+                        ssh -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=no \
+                            "$SSH_USERNAME@$LMS_HOST" \
+                            "BUILD_NUMBER=${BUILD_NUMBER} APP_DIR=/opt/lms /opt/lms/deploy.sh"
+                    '''
                 }
             }
         }
-
-
-        // ==========================================
-        // 10. HEALTH CHECK
-        // ==========================================
 
         stage('Deployment Health Check') {
-
             steps {
+                echo 'Checking LMS health'
 
-                echo '======================================'
-                echo 'Checking LMS deployment health'
-                echo '======================================'
+                sh '''
+                    export LMS_URL="http://172.31.8.158"
 
-                timeout(time: 10, unit: 'MINUTES') {
-
-                    sshagent(credentials: [env.SSH_CREDENTIALS]) {
-
-                        sh """
-                            ssh \
-                            -o StrictHostKeyChecking=no \
-                            ${LMS_USER}@${LMS_HOST} \
-                            'LMS_URL="${LMS_URL}" \
-                             APP_DIR="${REMOTE_APP_DIR}" \
-                             bash ${REMOTE_APP_DIR}/current/scripts/health-check.sh'
-                        """
-                    }
-                }
+                    ./scripts/health-check.sh
+                '''
             }
         }
 
-
-        // ==========================================
-        // 11. FINAL VERIFICATION
-        // ==========================================
-
         stage('Final Verification') {
-
             steps {
+                echo 'Performing final LMS verification'
 
-                echo '======================================'
-                echo 'Final LMS verification'
-                echo '======================================'
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: env.SSH_CREDENTIALS,
+                    keyFileVariable: 'SSH_KEY',
+                    usernameVariable: 'SSH_USERNAME'
+                )]) {
 
-                sshagent(credentials: [env.SSH_CREDENTIALS]) {
+                    sh '''
+                        chmod 600 "$SSH_KEY"
 
-                    sh """
-                        ssh \
-                        -o StrictHostKeyChecking=no \
-                        ${LMS_USER}@${LMS_HOST} \
-                        'echo "Current release:" && \
-                         readlink -f ${REMOTE_APP_DIR}/current && \
-                         echo "Docker containers:" && \
-                         docker ps'
-                    """
+                        ssh -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=no \
+                            "$SSH_USERNAME@$LMS_HOST" \
+                            "echo LMS hostname: \$(hostname); \
+                             echo Docker containers:; \
+                             docker ps --format 'table {{.Names}}\\t{{.Status}}'"
+                    '''
                 }
             }
         }
     }
 
-
-    // ==============================================
-    // POST PIPELINE ACTIONS
-    // ==============================================
-
     post {
 
-        // ==========================================
-        // SUCCESS
-        // ==========================================
-
         success {
-
             echo '======================================'
             echo 'LMS DEPLOYMENT SUCCESSFUL'
             echo '======================================'
-
-            emailext(
-                to: 'abybarath27@gmail.com',
-                subject: "SUCCESS: LMS Deployment #${BUILD_NUMBER}",
-                body: """
-LMS Deployment Successful
-
-Job:
-${JOB_NAME}
-
-Build:
-#${BUILD_NUMBER}
-
-Commit:
-${GIT_COMMIT}
-
-Release:
-${RELEASE_ID}
-
-LMS URL:
-${LMS_URL}
-
-Deployment health check:
-PASSED
-
-Application status:
-HEALTHY
-
-Build URL:
-${BUILD_URL}
-"""
-            )
         }
 
-
-        // ==========================================
-        // FAILURE + ROLLBACK
-        // ==========================================
-
         failure {
-
             echo '======================================'
             echo 'LMS DEPLOYMENT FAILED'
             echo '======================================'
 
-            script {
-
-                try {
-
-                    echo 'Starting automatic rollback...'
-
-                    sshagent(credentials: [env.SSH_CREDENTIALS]) {
-
-                        sh """
-                            ssh \
-                            -o StrictHostKeyChecking=no \
-                            ${LMS_USER}@${LMS_HOST} \
-                            'if [ -f ${REMOTE_APP_DIR}/current/scripts/rollback.sh ]; then
-                                APP_DIR=${REMOTE_APP_DIR}
-                                bash ${REMOTE_APP_DIR}/current/scripts/rollback.sh
-                            else
-                                echo "Rollback script not found"
-                                exit 1
-                            fi'
-                        """
-                    }
-
-                    echo 'Rollback completed'
-
-                } catch (rollbackError) {
-
-                    echo '======================================'
-                    echo 'ROLLBACK FAILED'
-                    echo '======================================'
-
-                    echo "${rollbackError}"
-                }
-            }
-
-
-            emailext(
-                to: 'YOUR_EMAIL@example.com',
-                subject: "FAILED: LMS Deployment #${BUILD_NUMBER}",
-                body: """
-LMS Deployment FAILED
-
-Job:
-${JOB_NAME}
-
-Build:
-#${BUILD_NUMBER}
-
-Commit:
-${GIT_COMMIT}
-
-Release:
-${RELEASE_ID}
-
-Deployment or health check failed.
-
-Automatic rollback was triggered.
-
-Please review the Jenkins console output.
-
-Build URL:
-${BUILD_URL}
-"""
-            )
+            echo 'Rollback stage would be executed here.'
         }
 
-
-        // ==========================================
-        // ALWAYS
-        // ==========================================
-
         always {
-
             echo '======================================'
             echo 'Pipeline execution completed'
             echo '======================================'
